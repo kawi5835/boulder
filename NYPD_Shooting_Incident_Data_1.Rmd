@@ -1,0 +1,203 @@
+---
+title: "NYPD Shooting Incident Data - Final Project"
+date: "11/20/2021"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Libraries
+```{r libraries, message = FALSE}
+library(tidyverse)
+library(lubridate)
+```
+
+## Bring in Dataset
+
+The data for this project was found at the following website: <https://catalog.data.gov/dataset/nypd-shooting-incident-data-historic>. Each incident appears to be a row in the dataset. We get geographical information about the incident, such as boro, precinct, what type of location, and lat/long. We also get demographic data about the perpetrator and victim, such as age, sex, and race. There is also a flag for statistical murder.
+
+```{r bring in dataset}
+file_in <- "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+
+nypd_data_in <-read.csv(file_in)
+```
+
+## View Initial Dataset
+
+The dataset seems to be by incident, with various details surrounding the location, perpetrator, and victim.
+
+```{r initial dataset}
+summary(nypd_data_in)
+```
+
+## Initial Data Cleaning
+
+I am going to remove some geographical variables that I don't plan on using in my analysis. I then filter out any rows where there is missing victim information, as this seems suspect to me. I then convert the date field and convert a couple columns from numeric/string to factors. Finally, I look at a summary view of the dataset to make sure it's looking as expected. 
+```{r initial data cleaning}
+nypd_data <- nypd_data_in %>%
+  select(-c(X_COORD_CD:Lon_Lat)) %>%
+  select(-c(LOCATION_DESC)) %>%
+  filter(VIC_AGE_GROUP != 'UNKNOWN') %>%
+  filter(VIC_SEX != 'U') %>%
+  filter(VIC_RACE != 'UNKNOWN') %>%
+  filter(PERP_AGE_GROUP != '1020') %>%
+  filter(PERP_AGE_GROUP != '224') %>%
+  filter(PERP_AGE_GROUP != '940') %>%
+  filter(PERP_RACE != 'AMERICAN INDIAN/ALASKAN NATIVE') %>%
+  filter(VIC_RACE != 'AMERICAN INDIAN/ALASKAN NATIVE') %>%
+  drop_na(JURISDICTION_CODE) %>%
+  mutate(date = mdy(OCCUR_DATE)) %>%
+  mutate(PERP_AGE_GROUP = ifelse(PERP_AGE_GROUP == '', 'UNKNOWN',PERP_AGE_GROUP)) %>%
+  mutate(PERP_SEX = ifelse(PERP_SEX == '', 'UNKNOWN',PERP_SEX)) %>%
+  mutate(PERP_RACE = ifelse(PERP_RACE == '', 'UNKNOWN',PERP_RACE))
+
+cols <- c("BORO", "PRECINCT", "JURISDICTION_CODE", "STATISTICAL_MURDER_FLAG", "PERP_AGE_GROUP",
+          "PERP_SEX", "PERP_RACE", "VIC_AGE_GROUP", "VIC_SEX", "VIC_RACE")
+nypd_data[cols] <- lapply(nypd_data[cols], factor)
+
+summary(nypd_data)
+```
+
+## Feature Enginering
+Here I am creating some new variables to be used for further analysis.
+
+* Time of Day
+  + Day
+  + Evening
+  + Overnight
+* Month of Year
+* Race Comparison (Victim vs Perpetrator)
+  + Same Race
+  + Different Race
+* Perpetrator - Hispanic Flag
+* Victim - Hispanic Flag
+```{r feature engineering}
+nypd_data <- nypd_data %>%
+  mutate(hour = substr(OCCUR_TIME, 1, 2)) %>%
+  mutate(hour = str_replace(hour, ":", "")) %>%
+  mutate(hour = as.numeric(hour)) %>%
+  mutate(time_of_day = case_when(
+    hour < 6 ~ "Overnight",
+    hour < 18 ~ "Day",
+    hour < 22 ~ "Evening",
+    hour <= 24 ~ "Overnight"
+  )) %>%
+  mutate(time_of_day = as.factor(time_of_day)) %>%
+  mutate(month_of_year = substr(OCCUR_DATE, 1,2)) %>%
+  mutate(month_of_year = as.factor(month_of_year)) %>%
+  mutate(race_comp = as.factor(case_when(
+    as.character(PERP_RACE) != as.character(VIC_RACE) ~ "Different Race",
+    as.character(PERP_RACE) == as.character(VIC_RACE) ~ "Same Race"
+  ))) %>%
+  mutate(PERP_HISPANIC = ifelse(str_detect(as.character(PERP_RACE), "HISPANIC"), 1, 0)) %>%
+  mutate(PERP_RACE_2 = ifelse(PERP_RACE == "BLACK HISPANIC", "BLACK", 
+                              ifelse(PERP_RACE == "WHITE HISPANIC", "WHITE", as.character(PERP_RACE)))) %>%
+  mutate(PERP_RACE_2 = as.factor(PERP_RACE_2)) %>%
+  mutate(PERP_HISPANIC = as.factor(PERP_HISPANIC)) %>%
+  mutate(VIC_HISPANIC = ifelse(str_detect(as.character(PERP_RACE), "HISPANIC"), 1, 0)) %>%
+  mutate(VIC_RACE_2 = ifelse(VIC_RACE == "BLACK HISPANIC", "BLACK", 
+                             ifelse(VIC_RACE == "WHITE HISPANIC", "WHITE", as.character(VIC_RACE)))) %>%
+  mutate(VIC_RACE_2 = as.factor(VIC_RACE_2)) %>%
+  mutate(VIC_HISPANIC = as.factor(VIC_HISPANIC)) %>%
+  mutate(month = as.factor(month(date))) %>%
+  mutate(year = (year(date))) %>%
+  select(c(STATISTICAL_MURDER_FLAG, everything()))
+```
+
+## Analysis
+In this section, I tried looking at the data in several different ways to see if I could find anything interesting. A couple of items I found - The number of shooting incidents has decreased since 2005. Also, the percent of incidents that result in murder is different depending on the boro.
+```{r analysis, echo=FALSE}
+## Viewing murders by age group           
+murders_by_age <- nypd_data %>%
+  count(PERP_AGE_GROUP, STATISTICAL_MURDER_FLAG)
+
+murders_by_age %>%
+  ggplot(aes(x = PERP_AGE_GROUP, y = n, fill = STATISTICAL_MURDER_FLAG)) + 
+  geom_bar(position="dodge", stat="identity") +
+  theme(legend.position = "right", axis.text.x = element_text(angle = 90)) + 
+  labs(title = "Incidents by PERP_AGE_GROUP", y = NULL)
+
+murders_by_age_2 <- murders_by_age %>%
+  pivot_wider(names_from = STATISTICAL_MURDER_FLAG, values_from = n) %>%
+  mutate(Total = false + true) %>%
+  mutate(percent_of_incidents = (true / Total) * 100)
+murders_by_age_2
+
+## Viewing incidents by Boro over time (month)
+incidents_by_boro_month <- nypd_data %>%
+  ##group_by(month = lubridate::floor_date(date, "month")) %>%
+  group_by(month) %>%
+  count(BORO, month, STATISTICAL_MURDER_FLAG) %>%
+  pivot_wider(names_from = STATISTICAL_MURDER_FLAG, values_from = n) %>%
+  mutate(Total = false + true) %>%
+  mutate(percent_of_incidents = true / Total)
+
+incidents_by_boro_month %>%
+  ggplot(aes(x = month, y = Total, group = BORO, color = BORO)) + 
+  geom_line() +
+  theme(legend.position = "right", axis.text.x = element_text(angle = 90)) + 
+  labs(title = "Number of Incidents by BORO and Month", y = NULL)
+
+## # of Incidents by Boro by year
+nypd_data_by_boro_year <- nypd_data %>%
+  group_by(year) %>%
+  count(BORO, year)
+
+nypd_data_by_boro_year %>%
+    ggplot(aes(x = year, y = n, fill = BORO)) + 
+    geom_bar(position = "dodge", stat = "identity") + 
+    theme(legend.position = "right", axis.text.x = element_text(angle = 90)) + 
+    labs(title = "Number Incidents by BORO and Year", y = NULL)
+
+nypd_data_1 <- nypd_data %>%
+  select(-c(INCIDENT_KEY, OCCUR_TIME, OCCUR_DATE, PRECINCT, date, hour, PERP_RACE, VIC_RACE, month)) %>%
+  mutate(year = as.factor(year))
+
+```  
+
+## Creating Test/Train Data Sets for Modeling whether or not a murder occured
+In order to help with the imbalance in the datasets (number of murders is much lower than 50% of the dataset), I am creating a more balanced training set to assist in model training.
+```{r test and train sets}
+## Training Data
+input_true <- nypd_data_1[which(nypd_data_1$STATISTICAL_MURDER_FLAG == 'true'), ]  # all murders
+input_false <- nypd_data_1[which(nypd_data_1$STATISTICAL_MURDER_FLAG == 'false'), ]  # all non-murders
+set.seed(1234)
+input_true_training_rows <- sample(1:nrow(input_true), 0.7*nrow(input_true))  # murders for training
+input_false_training_rows <- sample(1:nrow(input_false), 0.7*nrow(input_true))  # non-murders for training. Pick as many non-murders as murders
+training_true <- input_true[input_true_training_rows, ]  
+training_false <- input_false[input_false_training_rows, ]
+trainingData <- rbind(training_true, training_false)
+
+# Create Test Data
+test_true <- input_true[-input_true_training_rows, ]
+test_false <- input_false[-input_false_training_rows, ]
+testData <- rbind(test_true, test_false)
+```
+## Modeling whether or not a murder occured
+I chose to do a logistic regression to determine whether or not the shooting resulted in a murder. There is definitely more than could be added to this model but this was a good start.
+```{r model, warning=FALSE}
+mod <- glm(STATISTICAL_MURDER_FLAG ~ ., data = trainingData, family = binomial)
+summary(mod)
+
+preds <- predict(mod,testData,type = "response")
+
+outcome = rep("true", dim(testData)[1])
+outcome[preds < .5] = "false"
+mean(outcome == testData$STATISTICAL_MURDER_FLAG)
+
+anova(mod, test="Chisq")
+```
+
+## Conclusion
+Overall, this was a very interesting dataset to dig into. There are definitely differences in incidents/murders by location, as well as age group of the perpetrator. The demographics of the victim and perpetrator also play a role and I think there is more data exploration to be done in this area. Perhaps there is more to be done with the distinct geography each incident occurred in. We do get the lat and long, so if we could find a way to use that in the modeling, that may be helpful.
+
+As with any analysis, there is bias to be discussed. One source of bias could be diving deeper into the race demographic but not as much into the other demographics. If time allows, this would be a good next step. I have my own personal bias that certain areas of New York are more dangerous than others, which is why I dug deeper into the Boro variable.
+
+## Session Info
+```{r session_info, echo=TRUE}
+sessionInfo()
+```
